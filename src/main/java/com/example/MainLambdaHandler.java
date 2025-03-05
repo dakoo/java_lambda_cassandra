@@ -3,7 +3,7 @@ package com.example;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.KafkaEvent;
-import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.driver.core.Session;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 
@@ -59,7 +59,7 @@ public class MainLambdaHandler implements RequestHandler<KafkaEvent, String> {
 
         // 4) Create the DynamoDB async client + writer
         CassandraClientProvider cassandraClientProvider= new CassandraClientProvider();
-        CqlSession session = cassandraClientProvider.getSession();
+        Session session = cassandraClientProvider.getSession();
         AsyncCassandraWriter writer = new AsyncCassandraWriter(session, config, parser.getModelClass());
         List<Object> models = new ArrayList<>();
         // 5) For each record, parse + prepare writes

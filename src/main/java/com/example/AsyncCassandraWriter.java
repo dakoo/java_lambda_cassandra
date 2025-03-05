@@ -1,10 +1,16 @@
 package com.example;
 
-import com.datastax.oss.driver.api.core.CqlSession;
-import com.datastax.oss.driver.api.core.cql.*;
+import com.datastax.driver.core.*;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
+
 import com.example.annotations.PartitionKey;
 import com.example.annotations.VersionKey;
-import lombok.extern.slf4j.Slf4j;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -13,37 +19,33 @@ import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
- * An AsyncCassandraWriter that:
- *  - Reflects a single model class at construction to identify columns
- *  - Builds and reuses ONE PreparedStatement for all inserts
- *  - Uses "USING TIMESTAMP <version>" for concurrency
- *  - Writes each item asynchronously (single-row inserts in parallel).
+ * AsyncCassandraWriter using the DataStax Java Driver 3.x with SLF4J logging.
+ * - Reuses a single PreparedStatement for all inserts (reflection-based)
+ * - Uses "USING TIMESTAMP <version>" for concurrency
+ * - Writes each item asynchronously (one row per call) in parallel.
  */
-@Slf4j
 public class AsyncCassandraWriter {
 
-    private final CqlSession session;
+    private static final Logger logger = LoggerFactory.getLogger(AsyncCassandraWriter.class);
+
+    private final Session session;         // 3.x driver uses Session (not CqlSession)
     private final EnvironmentConfig config;
 
     // Model reflection
     private final Class<?> modelClass;
     private final Field partitionKeyField;
     private final Field versionKeyField;
-    private final List<Field> columnFields;      // includes partitionKeyField, excludes versionKeyField
+    private final List<Field> columnFields; // includes partitionKey, excludes versionKey
 
     // Pre-built prepared statement for reuse
     private final PreparedStatement preparedStatement;
 
     /**
-     * Constructs the writer, reflecting on the given modelClass to discover
-     * all columns, partition key, and version key. Then builds a single
-     * prepared statement for repeated use.
-     *
-     * @param session the Cassandra session
-     * @param config  environment config (includes table name, etc.)
-     * @param modelClass the class to reflect, which must contain exactly one @PartitionKey and one @VersionKey
+     * @param session     DataStax 3.x Session
+     * @param config      environment config (table name, etc.)
+     * @param modelClass  the class to reflect for columns
      */
-    public AsyncCassandraWriter(CqlSession session, EnvironmentConfig config, Class<?> modelClass) {
+    public AsyncCassandraWriter(Session session, EnvironmentConfig config, Class<?> modelClass) {
         this.session = session;
         this.config = config;
         this.modelClass = modelClass;
@@ -54,160 +56,176 @@ public class AsyncCassandraWriter {
         this.versionKeyField = reflectionResult.versionKey;
         this.columnFields = reflectionResult.columnFields;
 
-        // 2) Build & store the single prepared statement
+        // 2) Build the single prepared statement
         this.preparedStatement = createPreparedStatement();
     }
 
     /**
-     * Asynchronously writes a list of items to Cassandra using the single re-used prepared statement.
-     * Returns a CompletableFuture that finishes when all inserts are done.
+     * Asynchronously writes each item in parallel using session.executeAsync(...).
+     * Returns a CompletableFuture<Void> that completes when all writes are done.
      */
     public void executeAsyncWrites(List<Object> items) {
         if (items == null || items.isEmpty()) {
-            log.info("No items to write. Returning completed future.");
+            logger.info("No items to write. Returning completed future.");
             return;
         }
 
-        log.info("executeAsyncWrites called with {} item(s).", items.size());
-        List<CompletableFuture<AsyncResultSet>> futures = new ArrayList<>(items.size());
+        logger.info("executeAsyncWrites called with {} item(s).", items.size());
+
+        // We'll gather a list of futures (CompletableFutures) for each item
+        List<CompletableFuture<ResultSet>> futures = new ArrayList<>(items.size());
 
         for (Object item : items) {
-            BoundStatement bound = buildBoundStatement(item);
-            CompletableFuture<AsyncResultSet> future =
-                    session.executeAsync(bound)
-                            .toCompletableFuture()
-                            .thenApply(rs -> {
-                                log.debug("Write succeeded for item: {}", item);
-                                return rs;
-                            })
-                            .exceptionally(ex -> {
-                                log.error("Write failed for item {}: {}", item, ex.getMessage(), ex);
-                                return null;
-                            });
+            BoundStatement boundStmt = buildBoundStatement(item);
+            // session.executeAsync returns a Guava ListenableFuture<ResultSet>
+            ListenableFuture<ResultSet> listenable = session.executeAsync(boundStmt);
 
-            futures.add(future);
+            // Convert ListenableFuture to CompletableFuture
+            CompletableFuture<ResultSet> completable = toCompletableFuture(listenable, item);
+
+            futures.add(completable);
         }
 
-        // Combine them all
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture<?>[0]));
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture<?>[0])).join();
     }
 
     /**
-     * Builds the BoundStatement for a single item, using the re-used PreparedStatement.
-     * The version is appended as the last bind parameter for 'USING TIMESTAMP ?'.
+     * Build the BoundStatement from the single prepared statement,
+     * binding all column fields + version as the final TIMESTAMP.
      */
     private BoundStatement buildBoundStatement(Object item) {
         try {
-            // 1) Extract the version
+            // Extract the version
             long versionValue = (long) versionKeyField.get(item);
 
-            // 2) Extract column values in the same order we built them
+            // Prepare an array of bind values: [colAVal, colBVal, partitionKeyVal, ..., versionVal]
             Object[] bindValues = new Object[columnFields.size() + 1];
 
             int i = 0;
-            for (Field field : columnFields) {
-                bindValues[i] = field.get(item);
+            for (Field f : columnFields) {
+                bindValues[i] = f.get(item);
                 i++;
             }
-
-            // The last slot is the version for USING TIMESTAMP
+            // The last slot is the version
             bindValues[columnFields.size()] = versionValue;
 
-            // 3) Bind & return
             return preparedStatement.bind(bindValues);
 
         } catch (IllegalAccessException e) {
-            log.error("Failed to bind statement for item {}", item, e);
+            logger.error("Failed to build BoundStatement for item: {}", item, e);
             throw new RuntimeException(e);
         }
     }
 
     /**
-     * Reflects the model class to find @PartitionKey, @VersionKey, and normal columns.
-     * Returns a ReflectionResult containing the fields. 
-     */
-    private ReflectionResult reflectModelClass(Class<?> modelCls) {
-        Field partitionKey = null;
-        Field versionKey = null;
-        List<Field> allColumns = new ArrayList<>();
-
-        for (Field f : modelCls.getDeclaredFields()) {
-            f.setAccessible(true);
-
-            if (f.isAnnotationPresent(PartitionKey.class)) {
-                if (partitionKey != null) {
-                    throw new RuntimeException("Multiple @PartitionKey fields found in " + modelCls.getName());
-                }
-                partitionKey = f;
-            } else if (f.isAnnotationPresent(VersionKey.class)) {
-                if (versionKey != null) {
-                    throw new RuntimeException("Multiple @VersionKey fields found in " + modelCls.getName());
-                }
-                versionKey = f;
-            } else {
-                // A normal column
-                allColumns.add(f);
-            }
-        }
-
-        if (partitionKey == null) {
-            throw new RuntimeException("No @PartitionKey found in " + modelCls.getName());
-        }
-        if (versionKey == null) {
-            throw new RuntimeException("No @VersionKey found in " + modelCls.getName());
-        }
-
-        // Also add the partition key field as part of the columns to insert
-        allColumns.add(partitionKey);
-
-        // The version key is not added to 'allColumns' because we pass it in USING TIMESTAMP
-        // (not as a normal column).
-
-        return new ReflectionResult(partitionKey, versionKey, allColumns);
-    }
-
-    /**
-     * Builds the PreparedStatement (INSERT ... USING TIMESTAMP ?) 
-     * from the discovered columns in the constructor.
+     * Create the single PreparedStatement using reflection data:
+     * "INSERT INTO <table> (col1, col2, ..., pk) VALUES (?, ?, ?, ...) USING TIMESTAMP ?"
      */
     private PreparedStatement createPreparedStatement() {
         String tableName = config.getCassandraTableName();
 
-        // Gather column names (for all fields except the version field).
-        List<String> columnNames = columnFields.stream()
+        // Gather column names from columnFields
+        List<String> colNames = columnFields.stream()
                 .map(Field::getName)
                 .collect(Collectors.toList());
 
-        // Prepare placeholders for all columns + 1 for the TIMESTAMP
-        // Actually, the last placeholder is for the TIMESTAMP in "USING TIMESTAMP ?"
-        // The columns themselves get placeholders in the VALUES portion
-        String joinedColumns = String.join(", ", columnNames);
-        String questionMarks = columnNames.stream()
+        String joinedColumns = String.join(", ", colNames);
+
+        // For each column, we have a "?"
+        String questionMarks = colNames.stream()
                 .map(c -> "?")
                 .collect(Collectors.joining(", "));
 
-        // e.g. "INSERT INTO tableName (colA, colB, id) VALUES (?, ?, ?) USING TIMESTAMP ?"
+        // final "?" is for the version in USING TIMESTAMP ?
         String cql = String.format(
                 "INSERT INTO %s (%s) VALUES (%s) USING TIMESTAMP ?",
                 tableName, joinedColumns, questionMarks
         );
 
-        log.info("Preparing statement: {}", cql);
+        logger.info("Preparing CQL statement: {}", cql);
         return session.prepare(cql);
     }
 
     /**
-     * A small holder for reflection results.
+     * Convert a Guava ListenableFuture<ResultSet> to a Java 8 CompletableFuture<ResultSet>,
+     * adding logging for success/failure.
      */
-    private static class ReflectionResult {
-        Field partitionKey;
-        Field versionKey;
-        List<Field> columnFields;
+    private CompletableFuture<ResultSet> toCompletableFuture(
+            ListenableFuture<ResultSet> listenableFuture,
+            Object item
+    ) {
+        CompletableFuture<ResultSet> cf = new CompletableFuture<>();
 
-        public ReflectionResult(Field pk, Field vk, List<Field> cols) {
+        Futures.addCallback(
+                listenableFuture,
+                new FutureCallback<ResultSet>() {
+                    @Override
+                    public void onSuccess(ResultSet result) {
+                        logger.debug("Write succeeded for item: {}", item);
+                        cf.complete(result);
+                    }
+
+                    @Override
+                    public void onFailure(Throwable t) {
+                        logger.error("Write failed for item {}: {}", item, t.getMessage(), t);
+                        cf.completeExceptionally(t);
+                    }
+                },
+                MoreExecutors.directExecutor() // you can use a dedicated executor if preferred
+        );
+
+        return cf;
+    }
+
+    /**
+     * Reflect the model class to find a single @PartitionKey, a single @VersionKey, and all other fields as columns.
+     */
+    private ReflectionResult reflectModelClass(Class<?> cls) {
+        Field pk = null;
+        Field vk = null;
+        List<Field> cols = new ArrayList<>();
+
+        for (Field f : cls.getDeclaredFields()) {
+            f.setAccessible(true);
+            if (f.isAnnotationPresent(PartitionKey.class)) {
+                if (pk != null) {
+                    throw new RuntimeException("Multiple @PartitionKey fields in " + cls.getName());
+                }
+                pk = f;
+            } else if (f.isAnnotationPresent(VersionKey.class)) {
+                if (vk != null) {
+                    throw new RuntimeException("Multiple @VersionKey fields in " + cls.getName());
+                }
+                vk = f;
+            } else {
+                cols.add(f);
+            }
+        }
+
+        if (pk == null) {
+            throw new RuntimeException("No @PartitionKey field in " + cls.getName());
+        }
+        if (vk == null) {
+            throw new RuntimeException("No @VersionKey field in " + cls.getName());
+        }
+
+        // The partition key is also a normal column
+        cols.add(pk);
+
+        // The version key is used only for the TIMESTAMP, not as a normal column
+        return new ReflectionResult(pk, vk, cols);
+    }
+
+    // Helper class to hold reflection results
+    private static class ReflectionResult {
+        final Field partitionKey;
+        final Field versionKey;
+        final List<Field> columnFields;
+
+        ReflectionResult(Field pk, Field vk, List<Field> cf) {
             this.partitionKey = pk;
             this.versionKey = vk;
-            this.columnFields = cols;
+            this.columnFields = cf;
         }
     }
 }

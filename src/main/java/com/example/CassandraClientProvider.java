@@ -1,79 +1,71 @@
 package com.example;
 
-import com.datastax.oss.driver.api.core.CqlSession;
-import lombok.extern.slf4j.Slf4j;
+import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.Session;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Arrays;
 
 /**
- * A simple provider that initializes and returns a Cassandra CqlSession.
- * Customize as needed for your environment (multiple contact points, etc.).
+ * CassandraClientProvider for driver 3.x + SLF4J.
+ * Builds a Cluster, obtains a Session, reuses it as a singleton.
  */
-@Slf4j
 public class CassandraClientProvider {
 
-    private final CqlSession session;
+    private static final Logger logger = LoggerFactory.getLogger(CassandraClientProvider.class);
+
+    private final Session session;
 
     public CassandraClientProvider() {
         // Read environment variables
-        String contactPointsStr = System.getenv("CASSANDRA_CONTACT_POINTS");
-        String localDc = System.getenv("CASSANDRA_LOCAL_DC");
+        String contactPointsStr = System.getenv("CASSANDRA_CONTACT_POINTS"); // e.g. "host1,host2"
+        String localDc = System.getenv("CASSANDRA_LOCAL_DC");               // e.g. "datacenter1"
+        String portStr = System.getenv("CASSANDRA_PORT");                   // e.g. "9042"
 
         if (contactPointsStr == null || contactPointsStr.isEmpty()) {
-            // Provide a default for local testing or throw an exception if mandatory
-            contactPointsStr = "localhost:9042";
-            log.warn("CASSANDRA_CONTACT_POINTS not set. Defaulting to localhost:9042");
+            contactPointsStr = "localhost";
+            logger.warn("CASSANDRA_CONTACT_POINTS not set. Defaulting to 'localhost'");
         }
-
         if (localDc == null || localDc.isEmpty()) {
-            // Provide a default DC name or throw an exception if mandatory
             localDc = "datacenter1";
-            log.warn("CASSANDRA_LOCAL_DC not set. Defaulting to datacenter1");
+            logger.warn("CASSANDRA_LOCAL_DC not set. Defaulting to 'datacenter1'");
+        }
+        int port = (portStr != null && !portStr.isEmpty()) ? Integer.parseInt(portStr) : 9042;
+
+        String[] hosts = contactPointsStr.split(",");
+        for (int i = 0; i < hosts.length; i++) {
+            hosts[i] = hosts[i].trim();
         }
 
-        // Parse contact points. For example: "host1:9042,host2:9042"
-        List<InetSocketAddress> contactPoints = parseContactPoints(contactPointsStr);
+        logger.info("Initializing Cassandra cluster with hosts={}, port={}, localDc={}",
+                Arrays.toString(hosts), port, localDc);
 
-        log.info("Initializing CqlSession with contactPoints={} and localDc={}",
-                contactPoints, localDc);
+        // Build cluster. If you have credentials, SSL, etc., do them here.
+        Cluster.Builder builder = Cluster.builder();
+        for (String host : hosts) {
+            builder.addContactPoint(host);
+        }
+        builder.withPort(port);
 
-        // Build the session
-        this.session = CqlSession.builder()
-                .withLocalDatacenter(localDc)
-                .addContactPoints(contactPoints)
-                .build();
+        // local DC is typically used for load balancing policies in 3.x, e.g. DCAwareRoundRobinPolicy
+        builder.withLoadBalancingPolicy(
+                new com.datastax.driver.core.policies.DCAwareRoundRobinPolicy(localDc)
+        );
 
-        log.info("CqlSession created successfully.");
+        // If you have credentials:
+        // builder.withCredentials("username", "password");
+
+        Cluster cluster = builder.build();
+
+        // Connect
+        // If you have a keyspace already: cluster.connect("myKeyspace")
+        this.session = cluster.connect();
+
+        logger.info("Cassandra session established successfully.");
     }
 
-    /**
-     * Returns the singleton CqlSession for your Lambda container.
-     */
-    public CqlSession getSession() {
+    public Session getSession() {
         return session;
-    }
-
-    /**
-     * Parses a comma-separated list of host:port strings into InetSocketAddress objects.
-     */
-    private List<InetSocketAddress> parseContactPoints(String contactPointsStr) {
-        List<InetSocketAddress> addresses = new ArrayList<>();
-        String[] parts = contactPointsStr.split(",");
-        for (String part : parts) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                String[] hostPort = trimmed.split(":");
-                if (hostPort.length == 2) {
-                    String host = hostPort[0];
-                    int port = Integer.parseInt(hostPort[1]);
-                    addresses.add(new InetSocketAddress(host, port));
-                } else {
-                    log.warn("Invalid contact point format: {} (expected host:port)", trimmed);
-                }
-            }
-        }
-        return addresses;
     }
 }
