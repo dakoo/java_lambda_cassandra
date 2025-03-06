@@ -3,7 +3,6 @@ package com.example;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.KafkaEvent;
-import com.datastax.driver.core.Session;
 import com.datastax.driver.mapping.MappingManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -84,7 +83,7 @@ public class MainLambdaHandler implements RequestHandler<KafkaEvent, String> {
         if (!config.isDryRun()) {
             writer.executeAsyncWrites(models);
         } else {
-            log.info("DRY_RUN=true, skipping DynamoDB writes.");
+            log.info("DRY_RUN=true, skipping Cassandra writes.");
         }
 
         log.info("\nLambda Execution Summary:\n");

@@ -1,9 +1,9 @@
 # Makefile for building and deploying a Gradle-based AWS Lambda
 
 # Variables (override these by specifying on the command line, e.g. `make deploy LAMBDA_FUNCTION_NAME=myFunc`)
-LAMBDA_FUNCTION_NAME ?= common_data_service_poc
+LAMBDA_FUNCTION_NAME ?= common_data_service_poc_cas
 REGION ?= ap-northeast-2
-JAR_NAME ?= java-lambda-kafka-dynamodb.jar
+JAR_NAME ?= java-lambda-kafka-cassandra.jar
 PROFILE ?= dev
 
 # Default target

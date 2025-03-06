@@ -10,8 +10,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 
 import com.example.annotations.VersionKey;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -25,9 +24,8 @@ import java.util.concurrent.CompletableFuture;
  *     so that only columns with an older timestamp get overwritten.
  *  3) Executes all writes asynchronously in parallel, returning a single future.
  */
+@Slf4j
 public class AsyncCassandraWriter {
-
-    private static final Logger logger = LoggerFactory.getLogger(AsyncCassandraWriter.class);
 
     private final Mapper<Object> mapper;
     private final Field versionField;
@@ -47,7 +45,7 @@ public class AsyncCassandraWriter {
         // Reflect to find the single field annotated with @VersionKey
         this.versionField = findVersionField(castedClass);
 
-        logger.info("AsyncCassandraWriter initialized for model={}, versionField={}",
+        log.info("AsyncCassandraWriter initialized for model={}, versionField={}",
                 castedClass.getSimpleName(), versionField.getName());
     }
 
@@ -57,11 +55,11 @@ public class AsyncCassandraWriter {
      */
     public void executeAsyncWrites(List<Object> items) {
         if (items == null || items.isEmpty()) {
-            logger.info("No items to write, returning completed future.");
+            log.info("No items to write, returning completed future.");
             return;
         }
 
-        logger.info("executeAsyncWrites called with {} item(s).", items.size());
+        log.info("executeAsyncWrites called with {} item(s).", items.size());
         List<CompletableFuture<Void>> futures = new ArrayList<>(items.size());
 
         for (Object entity : items) {
@@ -88,18 +86,18 @@ public class AsyncCassandraWriter {
             Futures.addCallback(lf, new FutureCallback<Void>() {
                 @Override
                 public void onSuccess(Void result) {
-                    logger.debug("Save succeeded for entity: {}", entity);
+                    log.debug("Save succeeded for entity: {}", entity);
                     cf.complete(null);
                 }
                 @Override
                 public void onFailure(Throwable t) {
-                    logger.error("Save failed for entity {}: {}", entity, t.getMessage(), t);
+                    log.error("Save failed for entity {}: {}", entity, t.getMessage(), t);
                     cf.completeExceptionally(t);
                 }
             }, MoreExecutors.directExecutor());
 
         } catch (IllegalAccessException e) {
-            logger.error("Failed to read @VersionKey field on entity {}", entity, e);
+            log.error("Failed to read @VersionKey field on entity {}", entity, e);
             cf.completeExceptionally(e);
         }
         return cf;
