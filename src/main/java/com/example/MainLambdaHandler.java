@@ -4,6 +4,7 @@ import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.KafkaEvent;
 import com.datastax.driver.core.Session;
+import com.datastax.driver.mapping.MappingManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 
@@ -58,9 +59,9 @@ public class MainLambdaHandler implements RequestHandler<KafkaEvent, String> {
         log.info("Using parser: {}", config.getParserName());
 
         // 4) Create the DynamoDB async client + writer
-        CassandraClientProvider cassandraClientProvider= new CassandraClientProvider();
-        Session session = cassandraClientProvider.getSession();
-        AsyncCassandraWriter writer = new AsyncCassandraWriter(session, config, parser.getModelClass());
+        CassandraClientProvider cassandraClientProvider = new CassandraClientProvider();
+        MappingManager manager = cassandraClientProvider.getMapperManager();
+        AsyncCassandraWriter writer = new AsyncCassandraWriter(manager, parser.getModelClass());
         List<Object> models = new ArrayList<>();
         // 5) For each record, parse + prepare writes
         for (KafkaEvent.KafkaEventRecord r : records) {

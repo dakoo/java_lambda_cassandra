@@ -18,6 +18,8 @@ dependencies {
     // DataStax Java Driver 3.x
     // Adjust the version as needed for your environment
     implementation 'com.datastax.cassandra:cassandra-driver-core:3.11.2'
+    // Object Mapper (for MappingManager, Mapper<T>)
+    implementation 'com.datastax.cassandra:cassandra-driver-mapping:3.11.2'
 
     // Guava (for ListenableFuture and Futures.addCallback) - often included already
     implementation 'com.google.guava:guava:31.1-jre'

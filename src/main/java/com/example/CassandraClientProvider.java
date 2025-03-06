@@ -2,6 +2,7 @@ package com.example;
 
 import com.datastax.driver.core.Cluster;
 import com.datastax.driver.core.Session;
+import com.datastax.driver.mapping.MappingManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,7 +16,7 @@ public class CassandraClientProvider {
 
     private static final Logger logger = LoggerFactory.getLogger(CassandraClientProvider.class);
 
-    private final Session session;
+    private final MappingManager manager;
 
     public CassandraClientProvider() {
         // Read environment variables
@@ -60,12 +61,13 @@ public class CassandraClientProvider {
 
         // Connect
         // If you have a keyspace already: cluster.connect("myKeyspace")
-        this.session = cluster.connect();
-
+        Session session = cluster.connect();
         logger.info("Cassandra session established successfully.");
+        // Create the MappingManager
+        manager = new MappingManager(session);
     }
 
-    public Session getSession() {
-        return session;
+    public MappingManager getMapperManager() {
+        return manager;
     }
 }
